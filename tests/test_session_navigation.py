@@ -229,6 +229,68 @@ class TestRemoveFromInsideSession:
         assert_session_not_exists(env, session_name)
 
 
+class TestSessionNameCollisions:
+    """Session targets must match exactly, not by tmux's prefix fallback.
+
+    tmux resolves an unqualified `-t name` by exact match, then by prefix, then
+    by fnmatch, so a name that is a prefix of another session's name reaches
+    that other session once its own is gone.
+    """
+
+    def test_remove_does_not_kill_a_prefix_compatible_session(
+        self, mux_server: TmuxEnvironment, workmux_exe_path: Path, repo_path: Path
+    ):
+        """Removing `quest` must not kill the session of `quest-two`.
+
+        Cleanup kills the target session by name when it runs from outside that
+        session. With prefix matching, a missing `<prefix>quest` session
+        resolves to `<prefix>quest-two` and takes another worktree's live
+        session -- agents included -- with it.
+        """
+        env = mux_server
+        doomed_branch = "quest"
+        bystander_branch = "quest-two"
+        doomed_session = get_session_name(doomed_branch)
+        bystander_session = get_session_name(bystander_branch)
+
+        write_workmux_config(repo_path)
+
+        doomed_path = add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            repo_path,
+            doomed_branch,
+            extra_args="--session --background",
+        )
+        add_branch_and_get_worktree(
+            env,
+            workmux_exe_path,
+            repo_path,
+            bystander_branch,
+            extra_args="--session --background",
+        )
+        assert_session_exists(env, doomed_session)
+        assert_session_exists(env, bystander_session)
+
+        # Close the doomed worktree's own session so only the prefix-compatible
+        # one is left for tmux to match.
+        env.tmux(["kill-session", "-t", f"={doomed_session}"])
+        assert_session_not_exists(env, doomed_session)
+
+        result = run_workmux_command(
+            env,
+            workmux_exe_path,
+            repo_path,
+            f"remove {doomed_branch} -f",
+        )
+        assert result.exit_code == 0, f"Remove failed: {result.stderr}"
+
+        assert poll_until(lambda: not doomed_path.exists(), timeout=5.0), (
+            "Worktree should be removed"
+        )
+        assert_session_exists(env, bystander_session)
+
+
 class TestCreateAndSwitch:
     """Tests for `workmux add --session` without --background.
 

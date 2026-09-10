@@ -551,6 +551,19 @@ impl TmuxBackend {
         }
     }
 
+    /// Target for a session, by name or id.
+    ///
+    /// tmux resolves an unqualified name by exact match, then by prefix, then
+    /// by fnmatch, so `wm-main` finds `wm-main-side-quest` when no `wm-main`
+    /// exists. `=` restricts it to the exact name. Session ids are already
+    /// unambiguous and are passed through.
+    fn session_target_arg(value: &str) -> String {
+        if value.starts_with('$') {
+            return value.to_string();
+        }
+        format!("={}", value)
+    }
+
     fn shell_escape(value: &str) -> String {
         format!("'{}'", value.replace('\'', r#"'\''"#))
     }
@@ -902,18 +915,21 @@ impl Multiplexer for TmuxBackend {
 
     fn switch_to_session(&self, prefix: &str, name: &str) -> Result<()> {
         let prefixed_name = util::prefixed(prefix, name);
-        self.tmux_cmd(&["switch-client", "-t", &prefixed_name])
+        let target = Self::session_target_arg(&prefixed_name);
+        self.tmux_cmd(&["switch-client", "-t", &target])
     }
 
     fn session_exists(&self, full_name: &str) -> Result<bool> {
         // has-session returns 0 if session exists, 1 if not
+        let target = Self::session_target_arg(full_name);
         self.tmux_command()
-            .args(&["has-session", "-t", full_name])
+            .args(&["has-session", "-t", &target])
             .run_as_check()
     }
 
     fn kill_session(&self, full_name: &str) -> Result<()> {
-        self.tmux_cmd(&["kill-session", "-t", full_name])
+        let target = Self::session_target_arg(full_name);
+        self.tmux_cmd(&["kill-session", "-t", &target])
     }
 
     fn kill_window(&self, full_name: &str) -> Result<()> {
@@ -970,7 +986,7 @@ impl Multiplexer for TmuxBackend {
 
     fn schedule_session_close(&self, full_name: &str, delay: Duration) -> Result<()> {
         let delay_secs = format!("{:.3}", delay.as_secs_f64());
-        let escaped_name = format!("'{}'", full_name.replace('\'', r#"'\''"#));
+        let escaped_name = Self::shell_escape(&Self::session_target_arg(full_name));
         let script = format!(
             "sleep {delay}; tmux kill-session -t {name} >/dev/null 2>&1",
             delay = delay_secs,
@@ -1095,7 +1111,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn shell_switch_session_cmd(&self, full_name: &str) -> Result<String> {
-        let escaped = Self::shell_escape(full_name);
+        let escaped = Self::shell_escape(&Self::session_target_arg(full_name));
         Ok(format!(
             "{} switch-client -t {} >/dev/null 2>&1",
             self.shell_tmux_command(),
@@ -1104,7 +1120,7 @@ impl Multiplexer for TmuxBackend {
     }
 
     fn shell_kill_session_cmd(&self, full_name: &str) -> Result<String> {
-        let escaped = Self::shell_escape(full_name);
+        let escaped = Self::shell_escape(&Self::session_target_arg(full_name));
         Ok(format!(
             "{} kill-session -t {} >/dev/null 2>&1",
             self.shell_tmux_command(),
@@ -1517,6 +1533,18 @@ fn inject_status_format(format: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_target_matches_names_exactly() {
+        // Without "=", tmux prefix-matches, so "wm-main" would resolve to a
+        // session named "wm-main-side-quest" when no "wm-main" exists.
+        assert_eq!(TmuxBackend::session_target_arg("wm-main"), "=wm-main");
+    }
+
+    #[test]
+    fn session_target_passes_session_ids_through() {
+        assert_eq!(TmuxBackend::session_target_arg("$23"), "$23");
+    }
 
     const LIVE_PANE_LINE: &str = "%7\t12345\tnode\t/repo\tWorking\tmain\twork\t$1\t@2";
 
